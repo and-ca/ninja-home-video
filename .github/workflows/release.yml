@@ -1,0 +1,142 @@
+name: Update Changelog on Release
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update_changelog:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          ref: main
+
+      - name: Update Changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTIONS_STEP_DEBUG: true
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git pull origin main  # Ensure we have the latest changes
+
+          # Fetch the latest tag and release date
+          git fetch --tags
+          LATEST_TAG=$(git describe --tags $(git rev-list --tags --max-count=1))
+          PREVIOUS_TAG=$(git tag --sort=-creatordate --merged | sed -n '2p') 
+
+          echo "::debug:: LATEST_TAG = ${LATEST_TAG}" 
+          echo "::debug:: PREVIOUS_TAG = ${PREVIOUS_TAG}" 
+
+          # Check if tags exist
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No tags found."
+            exit 1
+          fi
+
+          RELEASE_DATE=$(date +'%Y-%m-%d')
+
+          # Get the commit hash for the latest and previous tags
+          LATEST_TAG_HASH=$(git rev-parse "$LATEST_TAG")
+
+          # Get the tag date
+          LATEST_TAG_DATE=$(git show -s --format=%ci "$LATEST_TAG" | xargs -I{} date -u -d "{}" +"%Y-%m-%dT%H:%M:%SZ" )
+
+
+          # Check if PREVIOUS_TAG is set, otherwise use a default value or skip
+          if [ -z "$PREVIOUS_TAG" ]; then
+              PREVIOUS_TAG_DATE="2024-01-01T00:00:00Z"
+          else
+              # Get the previous tag hash and date if it exists
+              PREVIOUS_TAG_HASH=$(git rev-parse "$PREVIOUS_TAG")
+              PREVIOUS_TAG_DATE=$(git show -s --format=%ci "$PREVIOUS_TAG" | xargs -I{} date -u -d "{}" +"%Y-%m-%dT%H:%M:%SZ")
+          fi
+
+          echo "::debug:: LATEST_TAG_DATE = ${LATEST_TAG_DATE}" 
+          echo "::debug:: PREVIOUS_TAG_DATE = ${PREVIOUS_TAG_DATE}" 
+
+          # Prepare changelog entry
+          CHANGELOG_ENTRY="# **${LATEST_TAG}** (${RELEASE_DATE}) \n ## What's Changed\n\n"
+
+          # Append to CHANGELOG.md
+          echo -e "${CHANGELOG_ENTRY}" >> CHANGELOG.md
+
+          # Fetch merged PRs that belong to the current release
+          BREAKING_CHANGES=$(gh pr list --label "breaking change" --state merged --base main --json title,mergedAt,url,author --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\""| sed 's/^/* /')
+          BUGS=$(gh pr list --label "bug" --state merged --base main --json title,mergedAt,url,author --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\"" | sed 's/^/* /')
+          ENHANCEMENTS=$(gh pr list --label "enhancement" --state merged --base main --json title,mergedAt,url,author --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\"" | sed 's/^/* /')
+          SECURITY=$(gh pr list --label "security" --state merged --base main --json title,mergedAt,url,author --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\"" | sed 's/^/* /')
+
+          echo "::debug:: BREAKING_CHANGES = ${BREAKING_CHANGES}" 
+          echo "::debug:: BUGS = ${BUGS}" 
+          echo "::debug:: ENHANCEMENTS = ${ENHANCEMENTS}" 
+          echo "::debug:: SECURITY = ${SECURITY}" 
+
+          # Append categorized entries to CHANGELOG.md
+          {
+              if [ -n "$BREAKING_CHANGES" ]; then
+                 echo -e "### Breaking Changes 🛠\n ${BREAKING_CHANGES}\n"
+              fi
+              
+              if [ -n "$BUGS" ]; then
+                 echo -e "### Bugs 🐞\n ${BUGS}\n"
+              fi
+              
+              if [ -n "$ENHANCEMENTS" ]; then
+                 echo -e "### Exciting New Features 🎉\n  ${ENHANCEMENTS}\n"
+              fi
+              
+              if [ -n "$SECURITY" ]; then
+                 echo -e "### Security improvements 🔐\n  ${SECURITY}\n"
+              fi
+
+          } >> CHANGELOG.md
+
+          # Fetch all distinct labels that are not "security", "enhancement", "breaking change", or "bug"
+          OTHER_LABELS=$(gh pr list --state merged --base main --json mergedAt,labels --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | .labels[].name" | sort | uniq | grep -v -E '^(security|enhancement|breaking change|bug|workflow)$')
+
+          echo "::debug:: OTHER_LABELS = ${OTHER_LABELS}"
+
+          # Loop through each of these labels and append the PRs under the corresponding label
+          for label in ${OTHER_LABELS}; do
+            PRs_LABEL=$(gh pr list --label "$label" --state merged --base main --json title,mergedAt,url,author --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\") | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\"" | sed 's/^/* /')
+
+            if [ -n "$PRs_LABEL" ]; then
+              echo -e "### ${label^} 🛠 \n  ${PRs_LABEL}\n" >> CHANGELOG.md
+            fi
+          done
+
+          # Fetch PRs without any labels
+          OTHERS=$(gh pr list --state merged --base main --json title,mergedAt,url,author,labels --jq ".[] | select(.mergedAt > \"$PREVIOUS_TAG_DATE\" and .mergedAt <= \"$LATEST_TAG_DATE\" and (.labels | length == 0)) | \"\(.title) by [@\(.author.login)](https://github.com/\(.author.login)) in \(.url)\"" | sed 's/^/* /')
+
+          echo "::debug:: OTHERS = ${OTHERS}"
+
+          # Append Others section if PRs exist without labels
+          if [ -n "$OTHERS" ]; then
+            echo -e "### Other Changes 🛠 \n  ${OTHERS}\n" >> CHANGELOG.md
+          fi
+
+          #open the branch
+          git checkout -b workflow
+
+          # Add, commit, and push the changes only if there are changes
+          git add CHANGELOG.md
+
+          if ! git diff-index --quiet HEAD --; then
+            git commit -m "Update changelog for release $LATEST_TAG"
+            # git push origin HEAD:main  
+            git push origin workflow
+          fi
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create --base main --head workflow --title "Release" --body "This pull request includes updates for release, including changelog and formatting updates." --label "workflow"
